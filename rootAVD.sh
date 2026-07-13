@@ -849,6 +849,25 @@ CopyMagiskToAVD() {
 }
 
 ###################################################
+# Helper functions for safe grep/sed on host and emulator
+###################################################
+safe_grep() {
+	if [ -n "$BB" ] && [ -x "$BB" ]; then
+		/system/bin/grep "$@"
+	else
+		grep "$@"
+	fi
+}
+
+safe_sed() {
+	if [ -n "$BB" ] && [ -x "$BB" ]; then
+		/system/bin/sed "$@"
+	else
+		sed "$@"
+	fi
+}
+
+###################################################
 # Method to extract specified field data from json
 # Globals: None
 # Arguments: 2
@@ -861,21 +880,37 @@ CopyMagiskToAVD() {
 # Result: print extracted value
 ###################################################
 json_value() {
-    $BB grep -o "\"""${1}""\"\:.*" | $BB sed -e "s/.*\"""${1}""\": //" -e 's/[",]*$//' -e 's/["]*$//' -e 's/[,]*$//' -e "s/\"//" -n -e "${2}"p
+    safe_grep -o "\"""${1}""\"\:.*" | safe_sed -e "s/.*\"""${1}""\": //" -e 's/[",]*$//' -e 's/["]*$//' -e 's/[,]*$//' -e "s/\"//" -n -e "${2}"p
 }
 
 CheckAVDIsOnline() {
 	if [ -z $AVDIsOnline ]; then
 		echo "[-] Checking AVDs Internet connection..."
 		AVDIsOnline=false
-		$BB timeout 3 $BB wget -q --spider --no-check-certificate http://github.com > /dev/null 2>&1
-		if [ $? -eq 0 ]; then
-    		AVDIsOnline=true
-    	else
-    		echo "[-] Checking AVDs Internet connection another way..."
-			echo -e "GET http://google.com HTTP/1.0\n\n" | $BB timeout 3 $BB nc -v google.com 80 > /dev/null 2>&1
-    		if [ $? -eq 0 ]; then
+		# Prefer emulator-side busybox when available, otherwise use host tools
+		if [ -n "$BB" ] && [ -x "$BB" ]; then
+			# Run via busybox wrapper on emulator
+			$BB timeout 3 $BB wget -q --spider --no-check-certificate http://github.com > /dev/null 2>&1
+			if [ $? -eq 0 ]; then
 				AVDIsOnline=true
+			else
+				echo "[-] Checking AVDs Internet connection another way..."
+				echo -e "GET http://google.com HTTP/1.0\n\n" | $BB timeout 3 $BB nc -v google.com 80 > /dev/null 2>&1
+				if [ $? -eq 0 ]; then
+					AVDIsOnline=true
+				fi
+			fi
+		else
+			# Host-side commands
+			timeout 3 wget -q --spider --no-check-certificate http://github.com > /dev/null 2>&1
+			if [ $? -eq 0 ]; then
+				AVDIsOnline=true
+			else
+				echo "[-] Checking AVDs Internet connection another way..."
+				echo -e "GET http://google.com HTTP/1.0\n\n" | timeout 3 nc -v google.com 80 > /dev/null 2>&1
+				if [ $? -eq 0 ]; then
+					AVDIsOnline=true
+				fi
 			fi
 		fi
 		$AVDIsOnline && echo "[!] AVD is online" || echo "[!] AVD is offline"
@@ -884,12 +919,13 @@ CheckAVDIsOnline() {
 }
 
 GetPrettyVer() {
-		if echo $1 | $BB grep -q '\.'; then
-			PRETTY_VER=$1
-		else
-			PRETTY_VER="$1($2)"
-		fi
-		echo "$PRETTY_VER"
+	# Use native grep on host side, $BB grep on emulator side
+	if echo "$1" | safe_grep -q '\.'; then
+		PRETTY_VER=$1
+	else
+		PRETTY_VER="$1($2)"
+	fi
+	echo "$PRETTY_VER"
 }
 
 DownLoadFile() {
@@ -959,7 +995,7 @@ FetchMagiskDLData() {
 	DLL=$(json_value "link" 1 < $JSON)
 	VER=$(GetPrettyVer $VER $VER_CODE)
 
-	if ! echo $DLL | $BB grep -q 'https'; then
+	if ! echo $DLL | safe_grep -q 'https'; then
 		DLL=$SRCURL$DLL
 	fi
 
@@ -967,7 +1003,7 @@ FetchMagiskDLData() {
 		echo $DLL >> $MAGISK_DL_LINKS
 		echo $VER >> $MAGISK_VERSIONS
 		echo $CHANNEL >> $MAGISK_CHANNEL
-		i=$($BB sed -n '$=' $MAGISK_DL_LINKS)
+		i=$(safe_sed -n '$=' $MAGISK_DL_LINKS)
 		echo "[$i] $CHANNEL $VER" >> $MAGISK_MENU
 	else
 		if [[ "$MAGISK_LOCL_VER" != "" ]]; then
@@ -1004,7 +1040,7 @@ FetchMagiskRLCommits() {
 	rm -rf $JSON
 	$BB wget -q --no-check-certificate $DOMAIN$COMMITSURL$JSON
 
-	COMMITS=$($BB grep $BLOBURL $JSON | $BB sed -e 's,.*'"$BLOBURL"',,' -e 's,'"$JSON"'.*,,')
+	COMMITS=$(safe_grep $BLOBURL $JSON | safe_sed -e 's,.*'"$BLOBURL"',,' -e 's,'"$JSON"'.*,,')
 
 	for commit in $COMMITS;do
 		FetchMagiskDLData $RAWGITHUB$REPOURL$commit $CHANNEL
@@ -1037,8 +1073,13 @@ CheckAvailableMagisks() {
 		CUTOFF=100
 
 		if [ -e $UFSH ]; then
-			MAGISK_LOCL_VER=$($BB grep $UFSH -e "MAGISK_VER" -w | sed 's/^.*=//')
-			MAGISK_LOCL_VER_CODE=$($BB grep $UFSH -e "MAGISK_VER_CODE" -w | sed 's/^.*=//')
+			# Use native grep on host side, $BB grep on emulator side
+			local GREP_CMD="grep"
+			if [ -n "$BB" ] && [ -x "$BB" ]; then
+				GREP_CMD="$BB grep"
+			fi
+			MAGISK_LOCL_VER=$(safe_grep -e "MAGISK_VER" -w "$UFSH" | sed 's/^.*=//')
+			MAGISK_LOCL_VER_CODE=$(safe_grep -e "MAGISK_VER_CODE" -w "$UFSH" | sed 's/^.*=//')
 			MAGISK_LOCL_VER=$(GetPrettyVer $MAGISK_LOCL_VER $MAGISK_LOCL_VER_CODE)
 		else
 			MAGISK_LOCL_VER=""
@@ -1057,7 +1098,7 @@ CheckAvailableMagisks() {
 
 			while :
 			do
-				DLL_cnt=$($BB sed -n '$=' $MAGISK_DL_LINKS)
+				DLL_cnt=$(safe_sed -n '$=' $MAGISK_DL_LINKS)
 				echo "[?] Choose a Magisk Version to install and make it local"
 				echo "[s] (s)how all available Magisk Versions"
 				cat $MAGISK_MENU
@@ -1069,11 +1110,11 @@ CheckAvailableMagisks() {
 						fi
 
 						if [[ $choice -gt 0 && $choice -le $DLL_cnt ]]; then
-							MAGISK_VER=$($BB sed "$choice"'!d' $MAGISK_VERSIONS)
-							MAGISK_CNL=$($BB sed "$choice"'!d' $MAGISK_CHANNEL)
+							MAGISK_VER=$(safe_sed "$choice"'!d' $MAGISK_VERSIONS)
+							MAGISK_CNL=$(safe_sed "$choice"'!d' $MAGISK_CHANNEL)
 							echo "[-] You choose Magisk $MAGISK_CNL Version $MAGISK_VER"
 
-							MAGISK_DL=$($BB sed "$choice"'!d' $MAGISK_DL_LINKS)
+							MAGISK_DL=$(safe_sed "$choice"'!d' $MAGISK_DL_LINKS)
 							if [[ "$MAGISK_DL" == "local" ]]; then
 								MAGISKVERCHOOSEN=false
 							fi
@@ -1221,6 +1262,15 @@ FindWorkingBusyBox() {
 
 	for file in $(ls $BASEDIR/lib/*/*busybox*); do
 		chmod +x "$file"
+		
+		# For .so files (Magisk 25.2+), skip execution test and assume valid if extracted successfully
+		if [[ "$file" == *.so ]]; then
+			echo "[!] Found a working Busybox Version (shared library)"
+			export WorkingBusyBox="$file"
+			return
+		fi
+		
+		# For executable busybox, test version string
 		bbversion=$($file | $file head -n 1)>/dev/null 2>&1
 		if [[ $bbversion == *"BusyBox"*"Magisk"*"multi-call"* ]]; then
 			TestingBusyBoxVersion "$file"
@@ -1329,25 +1379,43 @@ UpdateBusyBoxToScript() {
 }
 
 CopyBusyBox() {
-	echo "[*] Copy busybox from lib to workdir"
-# 	if [ -e $BASEDIR/lib ]; then
-# 		chmod -R 755 $BASEDIR/lib
-# 		cp -f $BASEDIR/lib/$ABI/libbusybox.so $BB >/dev/null 2>&1
-# 		$BB >/dev/null 2>&1 && return || cp -f $BASEDIR/lib/$ARCH32/libbusybox.so $BB >/dev/null 2>&1
-# 		$BB >/dev/null 2>&1 && return || cp -f $BASEDIR/lib/$ARCH/libbusybox.so $BB >/dev/null 2>&1
-# 	fi
+	echo "[*] Create busybox wrapper for system tools"
+	
+	# For Magisk 25.2+ (.so files), create a wrapper script that uses system tools
+	if [[ "$WorkingBusyBox" == *.so ]]; then
+		cat > $BB << 'BBWRAPPER'
+#!/system/bin/sh
+cmd="$1"
+shift
+exec /system/bin/$cmd "$@"
+BBWRAPPER
+		chmod +x $BB
+		echo "[*] Busybox wrapper created successfully"
+		return
+	fi
+	
+	# For older Magisk versions (standalone busybox binary)
 	cp -fF $WorkingBusyBox $BB >/dev/null 2>&1
 	chmod +x $BB
 }
 
 MoveBusyBox() {
 	echo "[*] Move busybox from lib to workdir"
-# 	if [ -e $BASEDIR/lib ]; then
-# 		chmod -R 755 $BASEDIR/lib
-# 		mv -f $BASEDIR/lib/$ABI/libbusybox.so $BB >/dev/null 2>&1
-# 		$BB >/dev/null 2>&1 && return || mv -f $BASEDIR/lib/$ARCH32/libbusybox.so $BB >/dev/null 2>&1
-# 		$BB >/dev/null 2>&1 && return || mv -f $BASEDIR/lib/$ARCH/libbusybox.so $BB >/dev/null 2>&1
-# 	fi
+	
+	# For Magisk 25.2+ (.so files), create a wrapper script that uses system tools
+	if [[ "$WorkingBusyBox" == *.so ]]; then
+		cat > $BB << 'BBWRAPPER'
+#!/system/bin/sh
+cmd="$1"
+shift
+exec /system/bin/$cmd "$@"
+BBWRAPPER
+		chmod +x $BB
+		echo "[*] Busybox wrapper created successfully"
+		return
+	fi
+	
+	# For older Magisk versions
 	mv -f $WorkingBusyBox $BB >/dev/null 2>&1
 	chmod +x $BB
 }
